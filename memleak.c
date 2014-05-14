@@ -82,7 +82,15 @@ size_t strtosize(char *str)
 }
 
 #define OPTSTRING "rbkmgpl:c:"
-#define USAGE "Usage: " NAME " [-rp] [-bkmg] [-l limit[bkmg]] [-c chunk[bkmg]]\n"
+#define USAGE "Usage: " NAME " [-rp] [-bkmg] [-l limit[bkmg]] [-c chunk[bkmg]]\n" \
+              "\t-b) Display output in bytes (default)." \
+              "\t-c) Allocate memory in increments of the specified size. Units are the same as for -l." \
+              "\t-g) Display output in gibibytes." \
+              "\t-k) Display output in kibibytes." \
+              "\t-l) Stop once the specified limit is reached. Units can be B, kB, M, or GB." \
+              "\t-m) Display output in mebibytes." \
+              "\t-p) Only meaningful with -r. Keep polling malloc once bloating is complete." \
+              "\t-r) Keep running and hold onto the address space once bloating is complete."
 void parseargs(int argc, char **argv, opts_t *optsp)
 {
   int opt;
