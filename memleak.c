@@ -100,7 +100,6 @@ void eat_memory(opts_t *optsp)
         if(alloc >= optsp->limit) state = FULL;
         else if(p)
         {
-          putchar('.');
           alloc += optsp->chunk;
           break;
         }
