@@ -1,13 +1,14 @@
-#include <assert.h>
-#include <stdlib.h>
-#include <stdio.h>
-#include <unistd.h>
 #include <errno.h>
-#include <string.h>
+#include <limits.h>
 #include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
 
 #define NAME "memleak"
 #define CHUNK ((size_t)1024)
+#define DIE(...) do{ fprintf(stderr, __VA_ARGS__); exit(EXIT_FAILURE); }while(0)
 
 /* Option flags */
 typedef uint8_t flag_t;
@@ -16,82 +17,122 @@ typedef uint8_t flag_t;
 #define KBYTES       ((flag_t)0x04)
 #define MBYTES       ((flag_t)0x08)
 #define GBYTES       ((flag_t)0x10)
+#define POLL         ((flag_t)0x20)
 
-#define OPTSTRING "rbkmg"
-#define USAGE "Usage: " NAME " [-" OPTSTRING "]\n"
-#define DIE(...) do{ fprintf(stderr, __VA_ARGS__); exit(EXIT_FAILURE); }while(0)
-uint16_t parseargs(int argc, char **argv)
+typedef struct _opt_st
+{
+  flag_t flags;
+  size_t limit;
+  size_t chunk;
+  char unit_string[3];
+  size_t unit_scale;
+} opts_t;
+
+size_t strtosize(char *str)
+{
+  size_t size;
+  char *unit;
+
+  size = strtoull(str, &unit, 10);
+  switch(*unit)
+  {
+    case 'b': case 'B': case '\0': break;
+    case 'k': case 'K': size *= 1024; break;
+    case 'm': case 'M': size *= 1048576L; break;
+    case 'g': case 'G': size *= 1073741824L; break;
+    default: DIE("memleak: Unknown unit: %s", unit);
+  }
+
+  return size;
+}
+
+#define OPTSTRING "rbkmgpl:c:"
+#define USAGE "Usage: " NAME " [-rp] [-bkmg] [-l limit[bkmg]] [-c chunk[bkmg]]\n"
+void parseargs(int argc, char **argv, opts_t *optsp)
 {
   int opt;
-  flag_t flags = 0;
+
+  /* Default options */
+  optsp->flags = 0;
+  optsp->limit = SIZE_MAX;
+  optsp->chunk = CHUNK;
 
   while((opt = getopt(argc, argv, OPTSTRING)) != -1)
     switch(opt)
     {
-      case 'r': flags |= KEEP_RUNNING; break;
-      case 'b': flags |= BYTES; break;
-      case 'k': flags |= KBYTES; break;
-      case 'm': flags |= MBYTES; break;
-      case 'g': flags |= GBYTES; break;
+      case 'b': optsp->flags |= BYTES; break;
+      case 'c': optsp->chunk = strtosize(optarg); break;
+      case 'g': optsp->flags |= GBYTES; break;
+      case 'k': optsp->flags |= KBYTES; break;
+      case 'l': optsp->limit = strtosize(optarg); break;
+      case 'm': optsp->flags |= MBYTES; break;
+      case 'p': optsp->flags |= POLL; break;
+      case 'r': optsp->flags |= KEEP_RUNNING; break;
+      case 'h':
       default: DIE(USAGE);
     }
-  
-  return flags;
+
+  switch(optsp->flags & (BYTES | KBYTES | MBYTES | GBYTES))
+  {
+    case 0: /* Default to bytes */
+    case BYTES: strcpy(optsp->unit_string, ""); optsp->unit_scale = 1; break;
+    case KBYTES: strcpy(optsp->unit_string, "kB"); optsp->unit_scale = 1024; break;
+    case MBYTES: strcpy(optsp->unit_string, "MB"); optsp->unit_scale = 1048576L; break;
+    case GBYTES: strcpy(optsp->unit_string, "GB"); optsp->unit_scale = 1073741824L; break;
+    default: DIE(NAME ": Only one of -b, -k, -m, or -g may be specified\n");
+  }
 }
 
-void eat_memory(flag_t flags)
+void eat_memory(opts_t *optsp)
 {
   register void *p;
   register size_t alloc = 0;
-  char *unitstr;
-  size_t scale;
-  register eating = 1;
+  register enum {QUIT, EATING, LIMITED, FULL} state;
 
-  switch(flags & (BYTES | KBYTES | MBYTES | GBYTES))
-  {
-    case 0: /* Default to bytes */
-    case BYTES: unitstr = ""; scale = 1; break;
-    case KBYTES: unitstr = "kB"; scale = 1024; break;
-    case MBYTES: unitstr = "MB"; scale = 1048576L; break;
-    case GBYTES: unitstr = "GB"; scale = 1073741824L; break;
-    default: DIE(NAME ": Only one of -b, -k, -m, or -g may be specified\n");
-  }
-
-  while(1)
-  {
-    errno = 0;
-    p = malloc(CHUNK);
-
-    if(!p && eating)
-      switch(errno)
-      {
-        case ENOMEM: /* Limit found. */
-          printf("Limit reached at %llu %s\n", alloc/scale, unitstr) ;
-          eating = 0;
-          if(!(flags & KEEP_RUNNING)) exit(ENOMEM);
-          break;
-        default: /* Any other error means something went wrong. */
-          DIE(NAME ": malloc(): %s\n", strerror(errno));
-      }
-    else if(!eating && p)
+  state = EATING;
+  while(state)
+    switch(state)
     {
-      ++eating;
-      printf("Limit removed. Continuing to consume memory from %llu %s\n", alloc/scale, unitstr);
+      case EATING:
+        errno = 0;
+        p = malloc(optsp->chunk);
+
+        if(alloc >= optsp->limit) state = FULL;
+        else if(p)
+        {
+          putchar('.');
+          alloc += optsp->chunk;
+          break;
+        }
+        else if(errno == ENOMEM) state = LIMITED;
+        else DIE(NAME ": malloc(): %s\n", strerror(errno));
+
+        printf("\nLimit reached at %llu %s\n",
+               (long long unsigned)alloc/optsp->unit_scale, optsp->unit_string);
+        if(!(optsp->flags & KEEP_RUNNING)) state = QUIT;
+        break;
+      case LIMITED:
+        if((optsp->flags & POLL) && malloc(optsp->chunk))
+        {
+          alloc += optsp->chunk;
+          state = EATING;
+          printf("Limit break! How? Consuming memory from %llu %s\n",
+                 (long long unsigned)alloc/optsp->unit_scale, optsp->unit_string);
+        }
+        break;
+      case FULL:
+      default:
+        break;
     }
-
-    alloc += CHUNK;
-  }
-
 }
 
 int main(int argc, char **argv)
 {
-  flag_t flags;
+  opts_t opts;
 
-  flags = parseargs(argc, argv);
+  parseargs(argc, argv, &opts);
 
-  eat_memory(flags);
+  eat_memory(&opts);
 
-  assert("Should never get here.");
-  return 0;
+  return EXIT_SUCCESS;
 }
